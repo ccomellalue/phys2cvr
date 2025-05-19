@@ -17,7 +17,7 @@ from copy import deepcopy
 import numpy as np
 from peakdet.io import load_physio
 
-from phys2cvr import _version, io, signal, stats
+from phys2cvr import _version, io, signal_operations, stats
 from phys2cvr.cli.run import _check_opt_conf, _get_parser
 from phys2cvr.io import EXT_1D, EXT_NIFTI
 
@@ -69,6 +69,7 @@ def phys2cvr(
     run_regression=False,
     lagged_regression=True,
     r2model="full",
+    lag_min=None,
     lag_max=None,
     lag_step=None,
     legacy=False,
@@ -167,6 +168,10 @@ def phys2cvr(
         Possible options are 'full', 'partial', 'intercept'.
         See `stats.regression` help to understand them.
         Default: 'full'
+    lag_min : int or float, optional
+        Limits (both positive and negative) of the temporal area to explore,
+        expressed in seconds (e.g. ±9 seconds). Caution: this is not a pythonic
+        range, but a real range, i.e. the upper limit is included (e.g. [-9, +9]).
     lag_max : int or float, optional
         Limits (both positive and negative) of the temporal area to explore,
         expressed in seconds (e.g. ±9 seconds). Caution: this is not a pythonic
@@ -322,25 +327,48 @@ def phys2cvr(
     lowcut = io.if_declared_force_type(
         lowcut, "float", "lowcut"
     )  # Low cutoff frequency
-    lag_max = io.if_declared_force_type(lag_max, "float", "lag_max")  # Maximum lag
 
-    # Added by Cristina (line 321 to 341)
-    # Handle symmetric and asymmetric lag ranges
-    if isinstance(lag_max, (list, tuple)) and len(lag_max) == 2:
-        # If lag_max is a tuple or list with two values, treat it as an asymmetric range
-        lag_min = float(lag_max[0])  # First value is the minimum lag
-        lag_max = float(lag_max[1])  # Second value is the maximum lag
-        LGR.info(f"Using asymmetric lag range: [{lag_min}, {lag_max}]")
+    # New implementation of lag_min and lag_max
+    # Validate and set lag_min and lag_max
+    if lag_max is None:
+        raise ValueError("lag_max must be specified.")
 
-    elif isinstance(lag_max, (int, float)):
-        # If lag_max is a single value, treat it as a symmetric range
+    if lag_min is None:
+        # If lag_min is not provided, assume a symmetric range
         lag_min = -float(lag_max)
-        lag_max = float(lag_max)
-        LGR.info(f"Using symmetric lag range: [{lag_min}, {lag_max}]")
-
+        LGR.info(f"lag_min not provided. Assuming symmetric range: lag_min = {lag_min}")
     else:
-        # Raise an error if lag_max is invalid
-        raise ValueError("Invalid lag_max value. Using default symmetric range.")
+        lag_min = float(lag_min)
+
+    lag_max = float(lag_max)
+    # Now we can safely check the range
+    if lag_min >= lag_max:
+        raise ValueError(
+            f"Invalid lag range: lag_min ({lag_min}) >= lag_max ({lag_max})"
+        )
+
+    LGR.info(f"Using lag range: [{lag_min}, {lag_max}]")
+
+    # # Added by Cristina (line 330 to 349)
+    # lag_max = parse_lag_input(lag_max)
+    # lag_max = io.if_declared_force_type(lag_max, "float", "lag_max")  # Maximum lag
+    # # Handle symmetric and asymmetric lag ranges
+
+    # if isinstance(lag_max, (list, tuple)) and len(lag_max) == 2:
+    #     # If lag_max is a tuple or list with two values, treat it as an asymmetric range
+    #     lag_min = float(lag_max[0])  # First value is the minimum lag
+    #     lag_max = float(lag_max[1])  # Second value is the maximum lag
+    #     LGR.info(f"Using asymmetric lag range: [{lag_min}, {lag_max}]")
+
+    # elif isinstance(lag_max, (int, float)):
+    #     # If lag_max is a single value, treat it as a symmetric range
+    #     lag_min = -float(lag_max)
+    #     lag_max = float(lag_max)
+    #     LGR.info(f"Using symmetric lag range: [{lag_min}, {lag_max}]")
+
+    # else:
+    #     # Raise an error if lag_max is invalid
+    #   raise ValueError("Invalid lag_max value")
 
     # Validate and convert additional input parameters
     lag_step = io.if_declared_force_type(lag_step, "float", "lag_step")
@@ -368,7 +396,7 @@ def phys2cvr(
             # Apply a Butterworth filter to the functional signal
             if apply_filter:
                 LGR.info("Applying butterworth filter to {fname_func}")
-                func_avg = signal.filter_signal(
+                func_avg = signal_operations.filter_signal(
                     func_avg, tr, lowcut, highcut, butter_order
                 )
         else:
@@ -428,7 +456,9 @@ def phys2cvr(
         if apply_filter:
             # Apply a Butterworth filter to the functional data and compute the average signal
             LGR.info(f"Obtaining filtered average signal in {roiref}")
-            func_filt = signal.filter_signal(func, tr, lowcut, highcut, butter_order)
+            func_filt = signal_operations.filter_signal(
+                func, tr, lowcut, highcut, butter_order
+            )
             func_avg = func_filt[roi].mean(axis=0)
         else:
             # Compute the average signal without filtering
@@ -457,7 +487,7 @@ def phys2cvr(
                 )
         # Compute the SPC (signal percentage change) of the average signal (rather than the average of the SPC)
         # The former is more robust to intrinsic data noise than the latter
-        petco2hrf = signal.spc(func_avg)
+        petco2hrf = signal_operations.spc(func_avg)
 
         # Generate a base name for the output CO2 file (using functional file name as a base)
         # Reassign fname_co2 to fname_func for later use - calling splitext twice cause .gz
@@ -474,7 +504,7 @@ def phys2cvr(
         else:
             # Resample the average fMRI timeseries to the specified frequency
             LGR.info(f"Resampling the average fMRI timeseries at {freq}Hz")
-            petco2hrf = signal.resample_signal(petco2hrf, 1 / tr, freq)
+            petco2hrf = signal_operations.resample_signal(petco2hrf, 1 / tr, freq)
     else:
         # If a CO2 file is provided, check its type (.phys or 1D)
         co2_is_phys = io.check_ext(".phys", fname_co2)
@@ -533,7 +563,7 @@ def phys2cvr(
             petco2hrf = co2
         else:
             # Convolve the CO2 signal with the peaks to generate the HRF
-            petco2hrf = signal.convolve_petco2(co2, pidx, freq, outname)
+            petco2hrf = signal_operations.convolve_petco2(co2, pidx, freq, outname)
 
     # If a regressor directory is not specified, compute the regressors.
     if regr_dir is None:
@@ -544,6 +574,7 @@ def phys2cvr(
             tr,
             freq,
             outname,  # output file base name
+            lag_min,  # Adding minimum lag
             lag_max,
             trial_len,
             n_trials,
@@ -568,6 +599,7 @@ def phys2cvr(
                 tr,
                 freq,
                 outname,
+                lag_min,
                 lag_max,
                 trial_len,
                 n_trials,
@@ -593,7 +625,7 @@ def phys2cvr(
         oimg.header["dim"] = newdim
 
         # Compute signal percentage change of functional data
-        func = signal.spc(func)
+        func = signal_operations.spc(func)
 
         # Generate polynomial regressors (at least average) and assign them to denoise_matrix for denosing
         LGR.info(f"Compute Legendre polynomials up to order {l_degree}")
@@ -690,12 +722,13 @@ def phys2cvr(
                     "(might take a while...)"
                 )
             # Determine the number of repetitions (nrep) based on lag_max and frequency
-            # if legacy:
-            #     # Legacy mode: use pythonic ranges (exclude the upper limit)
-            #     nrep = int(lag_max * freq * 2)
-            # else:
-            #     # Legacy mode: use pythonic ranges (exclude the upper limit)
-            #     nrep = int(lag_max * freq * 2) + 1
+            if legacy:
+                # Legacy mode: use pythonic ranges (exclude the upper limit)
+                num_steps = int((lag_max - lag_min) / lag_step)
+                # Include the upper limit
+            else:
+                # Legacy mode: use pythonic ranges (exclude the upper limit)
+                num_steps = int(round((lag_max - lag_min) / lag_step)) + 1
 
             if regr_dir:
                 # If a regressor directory is specified, set the output prefix
@@ -784,15 +817,16 @@ def phys2cvr(
                 # If no lag map is provided, calculate lagged regressors dynamically
                 # Check the number of repetitions first
                 if lag_step:
-                    # Convert lag_step to samples
                     step = int(lag_step * freq)
+                    LGR.info(f"Using lag step of {lag_step} seconds ({step} samples)")
                 else:
                     step = 1
+                    LGR.info("Using lag step of 1 sample")
                 # this was the lag range implemment by stefano as it is symmetric
                 # lag_range = list(range(0, nrep, step))
 
                 # Create Cristina's lag range taking into account asymmetric lag and symmetric lag
-                lag_range = np.arange(lag_min, lag_max + lag_step, lag_step)
+                lag_range = np.linspace(lag_min, lag_max, num_steps)
                 LGR.info(f"Generated lag range: {lag_range}")
 
                 # Prepare empty matrices to store results for all lags
@@ -812,7 +846,9 @@ def phys2cvr(
                     LGR.info(f"Perform L-GLM number {n + 1} of {len(lag_range)}")
                     try:
                         # Use precomputed regressors if available
-                        regr = regr_shifts[:, i]
+                        # regr = regr_shifts[:, i]
+                        regr_index = int(round(i))
+                        regr = regr_shifts[:, regr_index]
                         LGR.debug(f"Using shift {i} from matrix in memory: {regr}")
                     except NameError:
                         # Otherwise, load regressors from file

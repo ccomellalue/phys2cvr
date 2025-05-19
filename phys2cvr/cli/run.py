@@ -456,14 +456,30 @@ def _get_parser():
 
     opt_lreg = parser.add_argument_group("Optional Arguments for the lagged regression")
     opt_lreg.add_argument(
-        "-lm",
+        "-lmin",
+        "--lag-min",
+        dest="lag_min",
+        type=float,
+        help=(
+            "Minimum lag to consider during lag regression "
+            "in seconds. The same lag will be considered in "
+            "both directions if this variable is empty.\n"
+            "Despite the code being python, the upper limit "
+            "is included in the computation. E.g. -lm 9 "
+            "-ls .3 means [-9, +9] (61 regressors)."
+        ),
+        default=None,
+    )
+
+    opt_lreg = parser.add_argument_group("Optional Arguments for the lagged regression")
+    opt_lreg.add_argument(
+        "-lmax",
         "--lag-max",
         dest="lag_max",
         type=float,
         help=(
             "Maximum lag to consider during lag regression "
-            "in seconds. The same lag will be considered in "
-            "both directions.\n"
+            "in seconds. This will be indicated mandatory from the user.\n"
             "Despite the code being python, the upper limit "
             "is included in the computation. E.g. -lm 9 "
             "-ls .3 means [-9, +9] (61 regressors)."

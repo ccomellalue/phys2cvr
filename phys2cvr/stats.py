@@ -16,7 +16,7 @@ import numpy as np
 import scipy.stats as sct
 
 from phys2cvr.io import FIGSIZE, SET_DPI, export_regressor
-from phys2cvr.signal import resample_signal
+from phys2cvr.signal_operations import resample_signal
 
 R2MODEL = ["full", "partial", "intercept", "adj_full", "adj_partial", "adj_intercept"]
 
@@ -110,6 +110,7 @@ def get_regr(
     tr,
     freq,
     outname,
+    lag_min=None,
     lag_max=None,
     trial_len=None,
     n_trials=None,
@@ -134,6 +135,8 @@ def get_regr(
         Sample frequency of petco2hrf
     outname : list or path
         Path to output directory for regressors.
+    lag_min : int or float, optional
+        Limits (both positive and negative) of the temporal area to explore,
     lag_max : int or float, optional
         Limits (both positive and negative) of the temporal area to explore,
         expressed in seconds.
@@ -176,7 +179,7 @@ def get_regr(
         LGR.info(f"Specified {n_trials} trials lasting {trial_len} seconds")
         if n_trials > 2:
             LGR.info("Ignoring first trial to improve first bulk shift estimation")
-            first_tp = int(trial_len * freq)
+            first_tp = int(trial_len * freq)  # Converting trial length to samples
         else:
             LGR.info("Using all trials for bulk shift estimation")
         if n_trials > 3:
@@ -196,28 +199,33 @@ def get_regr(
     else:
         LGR.info("Using all trials for bulk shift estimation.")
 
-    # Upsample functional signal
+    # Upsample functional signal to match petco2hrf frequency
     func_upsampled = resample_signal(func_avg, 1 / tr, freq)
-    len_upd = func_upsampled.shape[0]
+    len_upd = func_upsampled.shape[0]  # length of the upsampled functional signal
 
     # Preparing breathhold and CO2 trace for Xcorr
     func_cut = func_upsampled[first_tp:last_tp]
     petco2hrf_cut = petco2hrf[first_tp:]
 
-    nrep = abs(petco2hrf_cut.shape[0] - func_cut.shape[0])
+    #  Nrep is the difference in length of both signals
+    # diff_length_ts change the name for clarity
+    diff_length_ts = abs(petco2hrf_cut.shape[0] - func_cut.shape[0])
 
-    # Preparing time axis for plots
-    time_axis = np.arange(0, nrep / freq, 1 / freq)
+    # Preparing time axis for plots (in seconds)
+    time_axis = np.arange(0, diff_length_ts / freq, 1 / freq)
 
-    if nrep < time_axis.shape[0]:
-        time_axis = time_axis[:nrep]
-    elif nrep > time_axis.shape[0]:
+    if diff_length_ts < time_axis.shape[0]:
+        time_axis = time_axis[:diff_length_ts]
+    elif diff_length_ts > time_axis.shape[0]:
         time_axis = np.pad(
-            time_axis, (0, int(nrep - time_axis.shape[0])), "linear_ramp"
+            time_axis, (0, int(diff_length_ts - time_axis.shape[0])), "linear_ramp"
         )
 
     if not skip_xcorr:
-        _, optshift, xcorr = x_corr(func_cut, petco2hrf, nrep, abs_xcorr=abs_xcorr)
+        # Performing cross correlation to estimate the bulk shift
+        _, optshift, xcorr = x_corr(
+            func_cut, petco2hrf, diff_length_ts, abs_xcorr=abs_xcorr
+        )
         LGR.info(f"Cross correlation estimated bulk shift at {optshift / freq} seconds")
         # Export estimated optimal shift in seconds
         with open(f"{outname}_optshift.1D", "w") as f:
@@ -233,8 +241,10 @@ def get_regr(
 
     # Check which timeseries was shifted
     if func_cut.shape[0] <= petco2hrf.shape[0]:
+        # If func is shorter or equal, extract the portion of the CO2 signal starting from the optimal shift
         petco2hrf_shift = petco2hrf[optshift : optshift + len_upd]
     elif func_cut.shape[0] > petco2hrf.shape[0]:
+        # If func is longer, # pad the CO2 signal with the mean value to match the length of the functional signal
         petco2hrf_shift = np.pad(
             petco2hrf,
             (int(optshift), int(func_cut.shape[0] - petco2hrf.shape[0] - optshift)),
@@ -244,11 +254,13 @@ def get_regr(
 
     # Exporting figures of shift
     plt.figure(figsize=FIGSIZE, dpi=SET_DPI)
+    # Plot the z-scored (standardized) CO2 signal and functional signal
     plt.plot(sct.zscore(petco2hrf_shift), "-", sct.zscore(func_upsampled), "-")
     plt.title("GM and shift")
     plt.savefig(f"{outname}_petco2hrf.png", dpi=SET_DPI)
     plt.close()
 
+    # Export the demeaned CO2 signal as a regressor
     petco2hrf_demean = export_regressor(
         petco2hrf_shift, freq, tr, outname, "petco2hrf", ext
     )
@@ -256,42 +268,60 @@ def get_regr(
     # Initialise the shifts first.
     petco2hrf_shifts = None
     if lagged_regression and lag_max:
+        # If lagged regression is enabled and a maximum lag is specified, prepare to generate lagged regressors
         outprefix = os.path.join(
             os.path.split(outname)[0], "regr", os.path.split(outname)[1]
         )
         os.makedirs(os.path.join(os.path.split(outname)[0], "regr"), exist_ok=True)
 
         # Set num of fine shifts: 9 seconds is a bit more than physiologically feasible
-        negrep = int(lag_max * freq)
+
+        # Adjusting so it can valid in symmetric and asymmetric lag #first_rep
+        # eliminating the name negrep and posrep to first and last, dont know if it is easier to read
+
+        # Calculating the total number of lags
+        first_rep = int((lag_min) * freq)
         if legacy:
-            posrep = negrep
+            last_rep = int((lag_max) * freq)  #
         else:
-            posrep = negrep + 1
+            last_rep = int((lag_max) * freq) + 1
+        # if legacy:F
+        #     posrep = negrep
+        # else:
+        #     posrep = negrep + 1
+
+        # Initialize an empty array to store the shifted regressors
         petco2hrf_shifts = np.empty(
-            [func_avg.shape[0], negrep + posrep], dtype="float32"
+            [func_avg.shape[0], last_rep - first_rep], dtype="float32"
         )
 
         # Padding regressor for shift, and padding optshift too
-
-        if (optshift - negrep) < 0:
-            lpad = negrep - optshift
+        # If the optimal shift - number of negative lags is less than 0, we need to pad the regressor
+        if (optshift - first_rep) < 0:
+            lpad = first_rep - optshift
         else:
             lpad = 0
 
-        if (optshift + posrep + len_upd) > petco2hrf.shape[0]:
-            rpad = (optshift + posrep + len_upd) - petco2hrf.shape[0]
+        if (optshift + last_rep + len_upd) > petco2hrf.shape[0]:
+            # If the optimal shift + number of positive lags and the length of the upsample signal
+            # exceeds the length of the CO2 signal, calculate the right padding needed
+            rpad = (optshift + last_rep + len_upd) - petco2hrf.shape[0]
         else:
             rpad = 0
 
+        # Pad the CO2 signal with the calculated left and right padding
         if func_cut.shape[0] <= petco2hrf.shape[0]:
             petco2hrf_padded = np.pad(petco2hrf, (int(lpad), int(rpad)), "mean")
         elif func_cut.shape[0] > petco2hrf.shape[0]:
             petco2hrf_padded = np.pad(petco2hrf_shift, (int(lpad), int(rpad)), "mean")
 
-        for n, i in enumerate(range(-negrep, posrep)):
+        # Generate lagged regressors by shifting the padded CO2 signal
+        for n, i in enumerate(range(first_rep, last_rep)):
+            # Extract the lagged version of the CO2 signal
             petco2hrf_lagged = petco2hrf_padded[
                 optshift + lpad - i : optshift + lpad - i + len_upd
             ]
+            # Export the lagged regressor and store it in the shifts array
             petco2hrf_shifts[:, n] = export_regressor(
                 petco2hrf_lagged, freq, tr, outprefix, f"{n:04g}", ext
             )

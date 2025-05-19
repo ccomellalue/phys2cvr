@@ -21,7 +21,7 @@ import logging
 import nibabel as nib
 import numpy as np
 
-from phys2cvr import signal
+from phys2cvr import signal_operations as signal
 
 SET_DPI = 100
 FIGSIZE = (18, 10)
